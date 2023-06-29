@@ -1,0 +1,61 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cainjector
+  namespace: cert-manager
+  labels:
+    app: cainjector
+    app.kubernetes.io/instance: cainjector
+  annotations:
+    reloader.stakater.com/auto: "true"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cainjector
+      app.kubernetes.io/instance: cainjector
+  template:
+    metadata:
+      labels:
+        app: cainjector
+        app.kubernetes.io/instance: cainjector
+    spec:
+      containers:
+      - name: cainjector
+        image: registry.lestak.sh/cainjector:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8443
+          name: webhook
+        env:
+        - name: OPERATOR_NAME
+          value: cainjector
+        - name: OPERATOR_DOMAIN
+          value: lestak.sh
+        - name: LOG_LEVEL
+          value: "info"
+        resources:
+          limits:
+            cpu: 100m
+            memory: 50Mi
+          requests:
+            cpu: 100m
+            memory: 50Mi
+        volumeMounts:
+        - name: webhook-certs
+          mountPath: /etc/webhook/certs
+          readOnly: true
+        - name: webhook-config
+          mountPath: /etc/webhook/config.yaml
+          subPath: config.yaml
+          readOnly: true
+      volumes:
+      - name: webhook-certs
+        secret:
+          secretName: cainjector-webhook-cert
+      - name: webhook-config
+        configMap:
+          name: cainjector-config
+      imagePullSecrets:
+      - name: regcred

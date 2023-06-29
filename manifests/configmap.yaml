@@ -1,0 +1,19 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cainjector-config
+  namespace: cert-manager
+data:
+  config.yaml: |
+    configMap: example-bundle
+    mountPath: /cacerts
+    certFile: ca.crt
+    excludeContainers:
+    - istio-proxy
+    excludeNamespaces:
+    - cert-manager
+    - istio-system
+    - kube-node-lease
+    - kube-public
+    - kube-system
