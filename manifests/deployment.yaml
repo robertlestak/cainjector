@@ -59,3 +59,8 @@ spec:
           name: cainjector-config
       imagePullSecrets:
       - name: regcred
+      tolerations:
+        - key: "node.kubernetes.io/arch"
+          operator: "Equal"
+          value: "arm64"
+          effect: "NoSchedule"
