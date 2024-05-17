@@ -279,7 +279,20 @@ RangeContainers:
 				}
 			}
 		}
-		// add the volume mount
+		// add the volume mount if it is not already there
+		if c.VolumeMounts == nil {
+			c.VolumeMounts = []v1.VolumeMount{}
+		}
+		for _, vm := range c.VolumeMounts {
+			if vm.Name == volumeName {
+				l.WithField("container", c.Name).Debug("volume mount already exists, skipping")
+				continue RangeContainers
+			}
+			if vm.MountPath == opts.MountPath {
+				l.WithField("container", c.Name).Debug("mount path already exists, skipping")
+				continue RangeContainers
+			}
+		}
 		pod.Spec.Containers[i].VolumeMounts = append(c.VolumeMounts, v1.VolumeMount{
 			Name:      volumeName,
 			MountPath: opts.MountPath,
