@@ -1,5 +1,12 @@
 name: dockerhub push
-on: [push]
+on:
+  push: {}
+  workflow_dispatch:
+    inputs:
+      TAG:
+        description: 'Tag to push, in addition to "latest"'
+        required: false
+        default: ''
 
 jobs:
   build-deploy:
@@ -32,10 +39,14 @@ jobs:
           --driver-opt=namespace=buildx,nodeselector="kubernetes.io/arch=arm64"
     - run: |
         echo ${{ secrets.DOCKER_HUB_PAT }} | docker login --password-stdin --username ${{ secrets.DOCKER_HUB_USERNAME }}
+        TAGS=""
+        if [ -n "${{ github.event.inputs.TAG }}" ]; then
+          TAGS=" -t ${{ secrets.DOCKER_HUB_USERNAME }}/cainjector:${{ github.event.inputs.TAG }}"
+        fi
         docker buildx build --builder=$BUILDER_NAME . \
           --platform linux/amd64,linux/arm64 \
           -t ${{ secrets.DOCKER_HUB_USERNAME }}/cainjector:latest \
-          -t ${{ secrets.DOCKER_HUB_USERNAME }}/cainjector:${{ github.sha }} \
+          -t ${{ secrets.DOCKER_HUB_USERNAME }}/cainjector:${{ github.sha }} $TAGS \
           --push --no-cache
     - name: cleanup
       if: always()
