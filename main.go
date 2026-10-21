@@ -11,6 +11,7 @@ import (
 
 	"github.com/bombsimon/logrusr/v4"
 	log "github.com/sirupsen/logrus"
+	"gomodules.xyz/jsonpatch/v2"
 	"gopkg.in/yaml.v3"
 	v1 "k8s.io/api/core/v1"
 	klog "sigs.k8s.io/controller-runtime/pkg/log"
@@ -243,78 +244,105 @@ func (m *mutator) Handle(ctx context.Context, req admission.Request) admission.R
 		l.Error("both secret and configMap specified, skipping")
 		return admission.Errored(http.StatusBadRequest, fmt.Errorf("both secret and configMap specified"))
 	}
-	l.Info("pod is enabled for injection")
-	volumeName := fmt.Sprintf("%s-%s", operatorName, opts.Secret)
-	if opts.Secret != "" {
-		l.Debug("injecting secret")
-		pod.Spec.Volumes = append(pod.Spec.Volumes, v1.Volume{
-			Name: volumeName,
-			VolumeSource: v1.VolumeSource{
-				Secret: &v1.SecretVolumeSource{
-					SecretName: opts.Secret,
-				},
-			},
-		})
-	} else if opts.ConfigMap != "" {
-		l.Debug("injecting configMap")
-		volumeName = fmt.Sprintf("%s-%s", operatorName, opts.ConfigMap)
-		pod.Spec.Volumes = append(pod.Spec.Volumes, v1.Volume{
-			Name: volumeName,
-			VolumeSource: v1.VolumeSource{
-				ConfigMap: &v1.ConfigMapVolumeSource{
-					LocalObjectReference: v1.LocalObjectReference{
-						Name: opts.ConfigMap,
-					},
-				},
-			},
-		})
+	if opts.Secret == "" && opts.ConfigMap == "" {
+		l.Debug("neither secret nor configMap specified, skipping")
+		return admission.Allowed("ok")
 	}
-RangeContainers:
-	for i, c := range pod.Spec.Containers {
-		if len(opts.ExcludeContainers) > 0 {
+	l.Info("pod is enabled for injection")
+	ops := injectionPatch(pod, opts)
+	if len(ops) == 0 {
+		l.Debug("nothing to inject")
+		return admission.Allowed("ok")
+	}
+	l.Info("pod mutated")
+	return admission.Patched("ok", ops...)
+}
+
+// injectionPatch returns the JSON patch operations that inject the CA bundle
+// into the pod. The patch only adds the volume, mounts and env vars: the pod
+// is never re-serialized, so fields this build's k8s.io/api types don't know
+// (such as a sidecar's restartPolicy on an older build) are left untouched
+// instead of being stripped from the pod.
+func injectionPatch(pod *v1.Pod, opts Options) []jsonpatch.JsonPatchOperation {
+	var ops []jsonpatch.JsonPatchOperation
+	volume := v1.Volume{}
+	if opts.Secret != "" {
+		volume.Name = fmt.Sprintf("%s-%s", operatorName, opts.Secret)
+		volume.VolumeSource = v1.VolumeSource{
+			Secret: &v1.SecretVolumeSource{
+				SecretName: opts.Secret,
+			},
+		}
+	} else {
+		volume.Name = fmt.Sprintf("%s-%s", operatorName, opts.ConfigMap)
+		volume.VolumeSource = v1.VolumeSource{
+			ConfigMap: &v1.ConfigMapVolumeSource{
+				LocalObjectReference: v1.LocalObjectReference{
+					Name: opts.ConfigMap,
+				},
+			},
+		}
+	}
+	var hasVolume bool
+	for _, v := range pod.Spec.Volumes {
+		if v.Name == volume.Name {
+			hasVolume = true
+			break
+		}
+	}
+	if !hasVolume {
+		ops = append(ops, appendOp("/spec/volumes", len(pod.Spec.Volumes), volume))
+	}
+	mount := v1.VolumeMount{
+		Name:      volume.Name,
+		MountPath: opts.MountPath,
+	}
+	env := v1.EnvVar{
+		Name:  "SSL_CERT_FILE",
+		Value: fmt.Sprintf("%s/%s", opts.MountPath, opts.CertFileName),
+	}
+	inject := func(path string, containers []v1.Container) {
+	RangeContainers:
+		for i, c := range containers {
+			l := log.WithField("container", c.Name)
 			for _, dc := range opts.ExcludeContainers {
 				if c.Name == dc {
-					l.WithField("container", c.Name).Debug("container excluded, skipping")
+					l.Debug("container excluded, skipping")
 					continue RangeContainers
 				}
 			}
-		}
-		// add the volume mount if it is not already there
-		if c.VolumeMounts == nil {
-			c.VolumeMounts = []v1.VolumeMount{}
-		}
-		for _, vm := range c.VolumeMounts {
-			if vm.Name == volumeName {
-				l.WithField("container", c.Name).Debug("volume mount already exists, skipping")
+			// skip containers that already have the mount
+			for _, vm := range c.VolumeMounts {
+				if vm.Name == volume.Name {
+					l.Debug("volume mount already exists, skipping")
+					continue RangeContainers
+				}
+				if vm.MountPath == opts.MountPath {
+					l.Debug("mount path already exists, skipping")
+					continue RangeContainers
+				}
+			}
+			cpath := fmt.Sprintf("%s/%d", path, i)
+			ops = append(ops, appendOp(cpath+"/volumeMounts", len(c.VolumeMounts), mount))
+			if opts.SetEnvVar == "false" {
 				continue RangeContainers
 			}
-			if vm.MountPath == opts.MountPath {
-				l.WithField("container", c.Name).Debug("mount path already exists, skipping")
-				continue RangeContainers
-			}
+			ops = append(ops, appendOp(cpath+"/env", len(c.Env), env))
 		}
-		pod.Spec.Containers[i].VolumeMounts = append(c.VolumeMounts, v1.VolumeMount{
-			Name:      volumeName,
-			MountPath: opts.MountPath,
-		})
-		// add the env var
-		if opts.SetEnvVar == "false" {
-			continue RangeContainers
-		}
-		pod.Spec.Containers[i].Env = append(c.Env, v1.EnvVar{
-			Name:  "SSL_CERT_FILE",
-			Value: fmt.Sprintf("%s/%s", opts.MountPath, opts.CertFileName),
-		})
 	}
-	// marshal the mutated pod
-	raw, err := json.Marshal(pod)
-	if err != nil {
-		l.WithError(err).Error("failed to marshal pod")
-		return admission.Errored(http.StatusBadRequest, err)
+	// init containers, native sidecars among them, need the CA too
+	inject("/spec/initContainers", pod.Spec.InitContainers)
+	inject("/spec/containers", pod.Spec.Containers)
+	return ops
+}
+
+// appendOp adds value to the end of the list at path, creating the list
+// when the pod doesn't have it yet.
+func appendOp(path string, n int, value any) jsonpatch.JsonPatchOperation {
+	if n == 0 {
+		return jsonpatch.NewOperation("add", path, []any{value})
 	}
-	// return the mutated pod
-	l.Info("pod mutated")
-	return admission.PatchResponseFromRaw(req.AdmissionRequest.Object.Raw, raw)
+	return jsonpatch.NewOperation("add", path+"/-", value)
 }
 
 func main() {

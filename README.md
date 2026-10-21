@@ -88,7 +88,9 @@ kubectl apply -f manifests/
 
 ## Usage
 
-Once `cainjector` is deployed, it will automatically inject the CA cert bundle into all pods in the cluster. You can verify that the CA cert bundle is being injected by checking the logs of the `cainjector` pod.
+Once `cainjector` is deployed, it will automatically inject the CA cert bundle into all pods in the cluster. Every container is injected, including init containers and native sidecars, unless it is listed in `excludeContainers`. Containers that already mount something at `mountPath` are left alone.
+
+The webhook's patch only adds the CA volume, the volume mounts and the `SSL_CERT_FILE` environment variable. It never rewrites the rest of the pod, so fields from Kubernetes versions newer than the one `cainjector` was built against (such as a sidecar's `restartPolicy: Always`) are kept as they are. You can verify that the CA cert bundle is being injected by checking the logs of the `cainjector` pod.
 
 ```bash
 kubectl logs -n cert-manager -l app=cainjector
