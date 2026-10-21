@@ -8,7 +8,7 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -o /bin/cainjector *.go
 
-FROM debian:bullseye-slim AS app
+FROM debian:trixie-slim AS app
 
 COPY --from=builder /bin/cainjector /bin/cainjector
 
